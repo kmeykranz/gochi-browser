@@ -267,6 +267,17 @@ cargo tauri build --features devtools   # 打包并保留 Web Inspector
 
 ---
 
+## 15. User-Agent(站点兼容)
+
+WKWebView 默认 UA 到 `(KHTML, like Gecko)` 就结束,**不含** Safari 的 `Version/x Safari/605.1.15` 两个 token(WKWebView 自己不设 `applicationNameForUserAgent`,wry 未传 `with_user_agent` 时也不会调 `setCustomUserAgent`)。于是靠 UA 白名单判断浏览器版本的站点(bilibili「您的浏览器版本过低哦」、部分国内站点)会识别不到任何已知浏览器而拒绝访问。
+
+- 修复:所有**外部页面**标签 webview 用 `user_agent()` 显式设置 UA = WKWebView 自身 UA 串 + ` Version/{Safari 版本} Safari/605.1.15`。
+- `Safari 版本` 读 `/Applications/Safari.app/Contents/Info.plist` 的 `CFBundleShortVersionString`(与系统 WebKit 同步),读不到回退 `18.0`;结果 `OnceLock` 缓存一次。
+- 引擎本身没变(仍是系统 WebKit),只是把 Safari 本该带的标识补回去,不会引入 Chrome 专属行为。
+- `chrome` / `overlay` 是本地页面,不设置。
+
+---
+
 ## 已知限制
 
 - 标签/内容 webview 会注入 `window.__TAURI__`,外部页面理论上能调用自定义命令(原型级安全取舍;目前这些命令只影响导航等低风险操作)。

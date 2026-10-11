@@ -304,6 +304,7 @@ struct BrowserState {
     /// Per-tab load generation, used to cancel stale progress pollers.
     load_gen: HashMap<String, u64>,
     /// Tabs with the Web Inspector currently open (debug builds).
+    #[cfg(any(debug_assertions, feature = "devtools"))]
     devtools: HashSet<String>,
 }
 
@@ -592,6 +593,45 @@ fn create_chrome(app: &AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     hide_window_title(&webview);
     Ok(())
+}
+
+/* ================================================================== user agent */
+
+/// Base User-Agent WKWebView reports by itself. Apple keeps the `10_15_7` /
+/// `605.1.15` parts frozen for compatibility, but the string stops right before
+/// Safari's own `Version/x Safari/605.1.15` tokens. Sites that sniff for a
+/// browser name + version (bilibili's "browser too old" gate, for one) then see
+/// no recognisable browser at all, so we rebuild Safari's UA from this base.
+const WK_UA_BASE: &str =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)";
+
+const SAFARI_VERSION_FALLBACK: &str = "18.0";
+
+/// Safari's version for this macOS install, read from Safari's own bundle so the
+/// claimed version tracks the system WebKit that WKWebView actually uses.
+#[cfg(target_os = "macos")]
+fn safari_version() -> String {
+    let path = std::path::Path::new("/Applications/Safari.app/Contents/Info.plist");
+    let Ok(value) = plist::Value::from_file(path) else {
+        return SAFARI_VERSION_FALLBACK.to_string();
+    };
+    value
+        .as_dictionary()
+        .and_then(|d| d.get("CFBundleShortVersionString"))
+        .and_then(|v| v.as_string())
+        .map(str::to_string)
+        .unwrap_or_else(|| SAFARI_VERSION_FALLBACK.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn safari_version() -> String {
+    SAFARI_VERSION_FALLBACK.to_string()
+}
+
+/// User-Agent sent by external pages (computed once).
+fn page_user_agent() -> &'static str {
+    static UA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    UA.get_or_init(|| format!("{WK_UA_BASE} Version/{} Safari/605.1.15", safari_version()))
 }
 
 /* ================================================================== overlay */
@@ -1051,6 +1091,9 @@ fn tab_builder(app: &AppHandle, id: String, url: Url) -> WebviewBuilder<tauri::W
     let newwin_app = app.clone();
 
     WebviewBuilder::new(id, WebviewUrl::External(url))
+        // WKWebView's own UA omits Safari's `Version/x Safari/605.1.15` tokens,
+        // which makes version-sniffing sites reject us as an ancient browser.
+        .user_agent(page_user_agent())
         // NOTE: no `on_navigation` handler on purpose. WebKit calls the
         // navigation-policy delegate for *every* frame (iframes, ads, blocked
         // requests), and a URL/loading update there corrupts the tab state and
@@ -1373,35 +1416,33 @@ fn find_in_page(app: &AppHandle, query: &str, forward: bool, reset: bool) -> Res
     w.eval(js).map_err(|e| e.to_string())
 }
 
+#[cfg(any(debug_assertions, feature = "devtools"))]
 fn toggle_devtools(app: &AppHandle) -> Result<(), String> {
     let id = require_active(app)?;
     let w = app.get_webview(&id).ok_or("tab gone")?;
-    #[cfg(any(debug_assertions, feature = "devtools"))]
-    {
-        let open = {
-            let state = app.state::<Shared>();
-            let st = state.lock().unwrap();
-            st.devtools.contains(&id)
-        };
-        if open {
-            w.close_devtools();
-        } else {
-            w.open_devtools();
-        }
+    let open = {
         let state = app.state::<Shared>();
-        let mut st = state.lock().unwrap();
-        if open {
-            st.devtools.remove(&id);
-        } else {
-            st.devtools.insert(id);
-        }
+        let st = state.lock().unwrap();
+        st.devtools.contains(&id)
+    };
+    if open {
+        w.close_devtools();
+    } else {
+        w.open_devtools();
     }
-    #[cfg(not(any(debug_assertions, feature = "devtools")))]
-    {
-        let _ = w;
-        return Err("devtools are disabled in release builds".into());
+    let state = app.state::<Shared>();
+    let mut st = state.lock().unwrap();
+    if open {
+        st.devtools.remove(&id);
+    } else {
+        st.devtools.insert(id);
     }
     Ok(())
+}
+
+#[cfg(not(any(debug_assertions, feature = "devtools")))]
+fn toggle_devtools(_app: &AppHandle) -> Result<(), String> {
+    Err("devtools are disabled in release builds".into())
 }
 
 /* ================================================================== action dispatch */
