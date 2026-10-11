@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities granted to the trusted browser chrome and overlay panel webviews only. The remote content webviews are intentionally left without any capability.",
-  "webviews": ["chrome", "overlay"],
+  "description": "Capabilities for the trusted overlay panel (command palette / tab switcher / address).",
+  "webviews": ["overlay"],
   "permissions": ["core:default"]
 }

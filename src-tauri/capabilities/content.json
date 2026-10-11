@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "content",
+  "description": "Minimal grant for remote tab pages: lets the injected transparent top strip move the window (and double-click to zoom). Nothing else.",
+  "webviews": ["tab-*"],
+  "remote": {
+    "urls": ["http://*/*", "https://*/*"]
+  },
+  "permissions": ["core:window:default", "core:window:allow-start-dragging"]
+}
