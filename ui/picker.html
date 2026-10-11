@@ -116,6 +116,23 @@
         background: var(--sel);
         border-color: var(--sel-border);
       }
+      .item .remove {
+        flex: none;
+        width: 18px;
+        height: 18px;
+        display: none;
+        place-items: center;
+        padding: 0;
+        border: none;
+        border-radius: 50%;
+        background: transparent;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      .item:hover .remove, .item.selected .remove { display: grid; }
+      .item .remove:hover { background: var(--key); color: var(--text); }
 
       #footer {
         flex: none;
@@ -124,9 +141,21 @@
         font-size: 12px;
         color: var(--muted);
         display: flex;
+        align-items: center;
         gap: 16px;
       }
       #footer kbd { font: inherit; color: var(--text); }
+      #footer .spacer { flex: 1 1 auto; }
+      #footer button {
+        padding: 4px 10px;
+        border: 1px solid var(--panel-border);
+        border-radius: 7px;
+        background: transparent;
+        color: var(--text);
+        font: inherit;
+        cursor: pointer;
+      }
+      #footer button:hover { background: var(--key); }
 
       #state {
         padding: 28px 24px;
@@ -156,6 +185,8 @@
           <span><kbd>&#8629;</kbd> open</span>
           <span><kbd>&#8984;&#8629;</kbd> new tab</span>
           <span><kbd>esc</kbd> close</span>
+          <span class="spacer"></span>
+          <button id="clear" hidden>Clear History</button>
         </div>
       </div>
     </div>
@@ -169,12 +200,25 @@
       let all = [];
       let filtered = [];
       let selected = 0;
+      let mode = null;
 
       function subText(item) {
         if (item.ts != null) {
           try { return new Date(item.ts * 1000).toLocaleString(); } catch (_) {}
         }
         return item.subtitle || "";
+      }
+
+      function reload() {
+        invoke("picker_items")
+          .then((payload) => {
+            all = (payload && payload.items) || [];
+            applyFilter();
+          })
+          .catch((err) => {
+            search.disabled = true;
+            showError(typeof err === "string" ? err : (err && err.message) || String(err));
+          });
       }
 
       function render() {
@@ -200,6 +244,21 @@
 
           el.appendChild(title);
           el.appendChild(sub);
+
+          if (item.removable) {
+            const remove = document.createElement("button");
+            remove.className = "remove";
+            remove.textContent = "\u00d7";
+            remove.title = "Remove bookmark";
+            remove.addEventListener("click", (e) => {
+              e.stopPropagation();
+              invoke("remove_bookmark", { url: item.url })
+                .then(reload)
+                .catch(console.error);
+            });
+            el.appendChild(remove);
+          }
+
           el.addEventListener("mouseenter", () => { selected = i; render(); });
           el.addEventListener("click", () => open(item.url, false));
           listEl.appendChild(el);
@@ -269,12 +328,21 @@
         history: "Search history…",
       };
 
+      const clearBtn = document.getElementById("clear");
+      clearBtn.addEventListener("click", () => {
+        invoke("clear_history")
+          .then(() => { clearBtn.hidden = true; reload(); })
+          .catch(console.error);
+      });
+
       Promise.all([
         invoke("overlay_mode").catch(() => null),
         invoke("picker_items"),
       ])
-        .then(([mode, payload]) => {
+        .then(([m, payload]) => {
+          mode = m;
           if (placeholders[mode]) search.placeholder = placeholders[mode];
+          if (mode === "history") clearBtn.hidden = false;
           all = (payload && payload.items) || [];
           applyFilter();
           search.focus();

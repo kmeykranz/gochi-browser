@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Open Address</title>
+    <title>Address</title>
     <style>
       :root {
         color-scheme: light dark;
@@ -11,7 +11,8 @@
         --panel-border: rgba(0, 0, 0, 0.12);
         --text: #1d1d1f;
         --muted: #86868b;
-        --accent: #4a90d9;
+        --sel: rgba(74, 144, 217, 0.16);
+        --sel-border: rgba(74, 144, 217, 0.55);
         --shadow: 0 18px 60px rgba(0, 0, 0, 0.34);
       }
       @media (prefers-color-scheme: dark) {
@@ -20,6 +21,8 @@
           --panel-border: rgba(255, 255, 255, 0.12);
           --text: #f2f2f4;
           --muted: #9a9aa0;
+          --sel: rgba(74, 144, 217, 0.28);
+          --sel-border: rgba(74, 144, 217, 0.7);
           --shadow: 0 18px 60px rgba(0, 0, 0, 0.6);
         }
       }
@@ -56,7 +59,7 @@
         border-radius: 14px;
         background: var(--panel);
         box-shadow: var(--shadow);
-        transform: translateY(-10vh);
+        transform: translateY(-8vh);
       }
 
       #panel .row {
@@ -65,11 +68,7 @@
         gap: 10px;
         padding: 0 16px;
       }
-      #panel .row .glyph {
-        flex: none;
-        color: var(--muted);
-        font-size: 16px;
-      }
+      #panel .row .glyph { flex: none; color: var(--muted); font-size: 16px; }
 
       #address {
         flex: 1 1 auto;
@@ -85,6 +84,45 @@
       }
       #address::placeholder { color: var(--muted); }
 
+      #suggestions {
+        max-height: 46vh;
+        overflow-y: auto;
+        padding: 6px;
+        border-top: 1px solid var(--panel-border);
+      }
+      #suggestions:empty { display: none; }
+
+      .item {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        padding: 8px 12px;
+        border: 1px solid transparent;
+        border-radius: 9px;
+        cursor: default;
+      }
+      .item .title {
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .item .sub {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        font-size: 12px;
+        color: var(--muted);
+        text-align: right;
+      }
+      .item.selected {
+        background: var(--sel);
+        border-color: var(--sel-border);
+      }
+
       #hint {
         flex: none;
         padding: 9px 16px;
@@ -94,10 +132,7 @@
         display: flex;
         gap: 16px;
       }
-      #hint kbd {
-        font: inherit;
-        color: var(--text);
-      }
+      #hint kbd { font: inherit; color: var(--text); }
     </style>
   </head>
   <body>
@@ -107,8 +142,10 @@
           <span class="glyph">&#9906;</span>
           <input id="address" type="text" placeholder="Search or enter address" spellcheck="false" autocomplete="off" />
         </div>
+        <div id="suggestions"></div>
         <div id="hint">
           <span><kbd>&#8629;</kbd> open</span>
+          <span><kbd>&#8984;&#8629;</kbd> new tab</span>
           <span><kbd>esc</kbd> cancel</span>
         </div>
       </div>
@@ -116,29 +153,97 @@
 
     <script>
       const { invoke } = window.__TAURI__.core;
-      const address = document.getElementById("address");
 
-      async function submit() {
-        const url = address.value.trim();
-        if (!url) {
+      const address = document.getElementById("address");
+      const listEl = document.getElementById("suggestions");
+
+      let items = [];
+      let selected = -1;
+      let seq = 0;
+
+      function subText(item) {
+        if (item.subtitle) return item.subtitle;
+        if (item.ts != null) {
+          try { return new Date(item.ts * 1000).toLocaleDateString(); } catch (_) {}
+        }
+        return "";
+      }
+
+      function render() {
+        listEl.textContent = "";
+        items.forEach((item, i) => {
+          const el = document.createElement("div");
+          el.className = "item" + (i === selected ? " selected" : "");
+
+          const title = document.createElement("span");
+          title.className = "title";
+          title.textContent = item.title || item.url;
+
+          const sub = document.createElement("span");
+          sub.className = "sub";
+          sub.textContent = subText(item);
+
+          el.appendChild(title);
+          el.appendChild(sub);
+          el.addEventListener("mouseenter", () => { selected = i; render(); });
+          el.addEventListener("click", (e) => open(item.url, e.metaKey || e.ctrlKey));
+          listEl.appendChild(el);
+        });
+        const sel = listEl.querySelector(".item.selected");
+        if (sel) sel.scrollIntoView({ block: "nearest" });
+      }
+
+      function refresh() {
+        const q = address.value.trim();
+        const mine = ++seq;
+        invoke("suggest", { query: q })
+          .then((result) => {
+            if (mine !== seq) return;
+            items = result || [];
+            selected = -1;
+            render();
+          })
+          .catch(console.error);
+      }
+
+      function open(url, newTab) {
+        invoke("open_url", { url, newTab }).catch(console.error);
+        invoke("dismiss_overlay").catch(console.error);
+      }
+
+      function submit(newTab) {
+        if (selected >= 0 && items[selected]) {
+          open(items[selected].url, newTab);
+          return;
+        }
+        const value = address.value.trim();
+        if (!value) {
           invoke("dismiss_overlay").catch(console.error);
           return;
         }
-        try {
-          await invoke("navigate", { url });
-        } catch (err) {
-          console.error("navigate failed:", err);
-        }
+        invoke("submit_url", { input: value, newTab }).catch(console.error);
         invoke("dismiss_overlay").catch(console.error);
       }
+
+      let timer = null;
+      address.addEventListener("input", () => {
+        clearTimeout(timer);
+        timer = setTimeout(refresh, 60);
+      });
 
       address.addEventListener("keydown", (e) => {
         if (e.key === "Enter") {
           e.preventDefault();
-          submit();
+          submit(e.metaKey || e.ctrlKey);
         } else if (e.key === "Escape") {
           e.preventDefault();
           invoke("dismiss_overlay").catch(console.error);
+        } else if (e.key === "ArrowDown") {
+          e.preventDefault();
+          if (items.length) { selected = (selected + 1) % items.length; render(); }
+        } else if (e.key === "ArrowUp") {
+          e.preventDefault();
+          if (items.length) { selected = (selected - 1 + items.length) % items.length; render(); }
         } else if (e.metaKey && e.key.toLowerCase() === "r") {
           e.preventDefault();
           invoke("dismiss_overlay").catch(console.error);
@@ -157,6 +262,7 @@
           if (active && active.url) address.value = active.url;
           address.focus();
           address.select();
+          refresh();
         })
         .catch(console.error);
     </script>

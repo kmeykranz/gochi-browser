@@ -3,29 +3,32 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Gochi Browser — Tabs</title>
+    <title>Gochi Browser — Chrome</title>
     <style>
       :root {
         color-scheme: light dark;
-        /* Matches the window background colour set on the Rust side so the strip
-           blends with the rounded page corners below it. */
+        /* Matches the window background colour set on the Rust side. */
         --bar: #ececee;
-        --tab: transparent;
-        --tab-hover: rgba(0, 0, 0, 0.06);
-        --tab-active: #ffffff;
-        --tab-active-border: rgba(0, 0, 0, 0.12);
         --text: #1d1d1f;
         --muted: #6e6e73;
+        --hover: rgba(0, 0, 0, 0.06);
+        --tab-active: #ffffff;
+        --tab-active-border: rgba(0, 0, 0, 0.12);
+        --field: #ffffff;
+        --field-border: rgba(0, 0, 0, 0.16);
+        --accent: #4a90d9;
         --close-hover: rgba(0, 0, 0, 0.12);
       }
       @media (prefers-color-scheme: dark) {
         :root {
           --bar: #1e1e20;
-          --tab-hover: rgba(255, 255, 255, 0.08);
-          --tab-active: #3a3a3f;
-          --tab-active-border: rgba(255, 255, 255, 0.1);
           --text: #f2f2f4;
           --muted: #9a9aa0;
+          --hover: rgba(255, 255, 255, 0.08);
+          --tab-active: #3a3a3f;
+          --tab-active-border: rgba(255, 255, 255, 0.1);
+          --field: #2b2b30;
+          --field-border: rgba(255, 255, 255, 0.16);
           --close-hover: rgba(255, 255, 255, 0.16);
         }
       }
@@ -44,11 +47,11 @@
       }
 
       #bar {
+        position: relative;
         display: flex;
         align-items: center;
         height: 100%;
-        /* Room for the native macOS traffic lights, which float above this
-           webview in the same top row. */
+        /* Room for the native macOS traffic lights. */
         padding: 0 8px 0 80px;
         gap: 6px;
       }
@@ -59,12 +62,15 @@
         gap: 6px;
         flex: 0 1 auto;
         min-width: 0;
-        overflow: hidden;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: none;
       }
+      #strip::-webkit-scrollbar { display: none; }
 
-      /* Flexible empty area that stays draggable. */
-      #drag { flex: 1 1 auto; align-self: stretch; }
+      #drag { flex: 1 1 auto; align-self: stretch; min-width: 12px; }
 
+      /* ---------- tabs ---------- */
       .tab {
         position: relative;
         display: flex;
@@ -72,15 +78,15 @@
         gap: 6px;
         height: 28px;
         flex: 0 1 200px;
-        min-width: 56px;
-        padding: 0 8px 0 10px;
+        min-width: 60px;
+        padding: 0 6px 0 8px;
         border: 1px solid transparent;
         border-radius: 7px;
-        background: var(--tab);
+        background: transparent;
         color: var(--muted);
         overflow: hidden;
       }
-      .tab:hover { background: var(--tab-hover); }
+      .tab:hover { background: var(--hover); }
       .tab.active {
         background: var(--tab-active);
         border-color: var(--tab-active-border);
@@ -88,6 +94,21 @@
         box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
       }
 
+      .fav {
+        flex: none;
+        width: 16px;
+        height: 16px;
+        display: grid;
+        place-items: center;
+        border-radius: 4px;
+        background: rgba(127, 127, 127, 0.22);
+        font-size: 10px;
+        font-weight: 600;
+        line-height: 1;
+        text-transform: uppercase;
+        color: var(--text);
+        cursor: pointer;
+      }
       .tab .title {
         flex: 1 1 auto;
         min-width: 0;
@@ -95,7 +116,6 @@
         white-space: nowrap;
         text-overflow: ellipsis;
       }
-
       .tab .close {
         flex: none;
         width: 16px;
@@ -115,6 +135,17 @@
       .tab:hover .close, .tab.active .close { opacity: 0.6; }
       .tab .close:hover { opacity: 1; background: var(--close-hover); }
 
+      /* spinning ring while the tab is loading */
+      .spinner {
+        width: 13px;
+        height: 13px;
+        border-radius: 50%;
+        border: 1.6px solid rgba(127, 127, 127, 0.35);
+        border-top-color: var(--accent);
+        animation: spin 0.7s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
       #newtab {
         flex: none;
         width: 26px;
@@ -130,8 +161,71 @@
         line-height: 1;
         cursor: pointer;
       }
-      #newtab:hover { background: var(--tab-hover); color: var(--text); }
+      #newtab:hover { background: var(--hover); color: var(--text); }
       #newtab:active { transform: scale(0.92); }
+
+      /* ---------- omnibox / find ---------- */
+      .mode {
+        display: none;
+        flex: 1 1 auto;
+        min-width: 0;
+        align-items: center;
+        gap: 8px;
+        height: 28px;
+        padding: 0 10px;
+        border: 1px solid var(--field-border);
+        border-radius: 8px;
+        background: var(--field);
+      }
+      body.omnibox #omnibox { display: flex; }
+      body.find #findbar { display: flex; }
+      body.omnibox #strip, body.omnibox #newtab, body.omnibox #drag,
+      body.find #strip, body.find #newtab, body.find #drag { display: none; }
+
+      .mode .glyph { flex: none; color: var(--muted); font-size: 13px; }
+      .mode input {
+        flex: 1 1 auto;
+        min-width: 0;
+        height: 100%;
+        border: none;
+        background: transparent;
+        color: var(--text);
+        font: inherit;
+        font-size: 13px;
+        outline: none;
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      .mode input::placeholder { color: var(--muted); }
+      .mode .hint { flex: none; color: var(--muted); font-size: 11px; }
+
+      /* ---------- progress + toast ---------- */
+      #progress {
+        position: absolute;
+        left: 0;
+        bottom: 0;
+        height: 2px;
+        width: 0;
+        background: var(--accent);
+        transition: width 0.15s ease, opacity 0.3s ease;
+        opacity: 0;
+      }
+      #toast {
+        position: absolute;
+        right: 12px;
+        top: 50%;
+        transform: translateY(-50%);
+        padding: 4px 10px;
+        border-radius: 7px;
+        background: var(--field);
+        border: 1px solid var(--field-border);
+        color: var(--text);
+        font-size: 12px;
+        opacity: 0;
+        transition: opacity 0.2s ease;
+        pointer-events: none;
+      }
+      #toast.show { opacity: 1; }
     </style>
   </head>
   <body>
@@ -139,6 +233,21 @@
       <div id="strip" data-tauri-drag-region></div>
       <button id="newtab" title="New Tab (⌘T)" data-tauri-drag-region="false">+</button>
       <div id="drag" data-tauri-drag-region></div>
+
+      <div id="omnibox" class="mode">
+        <span class="glyph">&#9906;</span>
+        <input id="omni-input" type="text" placeholder="Search or enter address" spellcheck="false" autocomplete="off" />
+        <span class="hint">&#8629; open · &#8984;&#8629; new tab</span>
+      </div>
+
+      <div id="findbar" class="mode">
+        <span class="glyph">&#8981;</span>
+        <input id="find-input" type="text" placeholder="Find in page" spellcheck="false" autocomplete="off" />
+        <span class="hint" id="find-hint">&#8629; next · &#8679;&#8629; prev · esc</span>
+      </div>
+
+      <div id="toast"></div>
+      <div id="progress"></div>
     </div>
 
     <script>
@@ -147,16 +256,48 @@
 
       const strip = document.getElementById("strip");
       const newtab = document.getElementById("newtab");
+      const omniInput = document.getElementById("omni-input");
+      const findInput = document.getElementById("find-input");
+      const progress = document.getElementById("progress");
+      const toast = document.getElementById("toast");
 
       let state = { tabs: [], active: null };
+      let lastFind = "";
+
+      /* ---------------- tabs ---------------- */
+      function letterFor(tab) {
+        try {
+          const host = new URL(tab.url).hostname.replace(/^www\./, "");
+          return (host[0] || "?").toUpperCase();
+        } catch (_) {
+          return "\u2022";
+        }
+      }
 
       function render() {
         strip.textContent = "";
         for (const tab of state.tabs) {
           const el = document.createElement("div");
           el.className = "tab" + (tab.id === state.active ? " active" : "");
-          el.title = tab.title || tab.url || "";
+          el.title = (tab.title || "") + "\n" + (tab.url || "");
           el.addEventListener("click", () => invoke("switch_to", { id: tab.id }).catch(console.error));
+          el.addEventListener("auxclick", (e) => {
+            if (e.button === 1) invoke("close_tab", { id: tab.id }).catch(console.error);
+          });
+
+          const fav = document.createElement("span");
+          if (tab.loading) {
+            fav.className = "spinner";
+            fav.title = "Stop loading";
+            fav.addEventListener("click", (e) => {
+              e.stopPropagation();
+              invoke("stop_tab", { id: tab.id }).catch(console.error);
+            });
+          } else {
+            fav.className = "fav";
+            fav.textContent = letterFor(tab);
+          }
+          el.appendChild(fav);
 
           const title = document.createElement("span");
           title.className = "title";
@@ -166,7 +307,7 @@
           const close = document.createElement("button");
           close.className = "close";
           close.textContent = "\u00d7";
-          close.title = "Close Tab (⌘W)";
+          close.title = "Close Tab (\u2318W)";
           close.addEventListener("click", (e) => {
             e.stopPropagation();
             invoke("close_tab", { id: tab.id }).catch(console.error);
@@ -175,8 +316,49 @@
 
           strip.appendChild(el);
         }
+        const activeEl = strip.querySelector(".tab.active");
+        if (activeEl) activeEl.scrollIntoView({ block: "nearest", inline: "nearest" });
       }
 
+      function setProgress(id, loading, value) {
+        if (id !== state.active) return;
+        if (loading) {
+          progress.style.opacity = "1";
+          progress.style.width = Math.max(6, Math.min(95, value * 100)) + "%";
+        } else {
+          progress.style.width = "100%";
+          progress.style.opacity = "0";
+          setTimeout(() => { progress.style.width = "0"; }, 300);
+        }
+      }
+
+      function showToast(message) {
+        toast.textContent = message;
+        toast.classList.add("show");
+        clearTimeout(showToast._t);
+        showToast._t = setTimeout(() => toast.classList.remove("show"), 1400);
+      }
+
+      /* ---------------- modes ---------------- */
+      function setMode(mode) {
+        document.body.classList.remove("omnibox", "find");
+        if (mode === "omnibox") {
+          const active = state.tabs.find((t) => t.id === state.active);
+          omniInput.value = active ? active.url : "";
+          document.body.classList.add("omnibox");
+          omniInput.focus();
+          omniInput.select();
+        } else if (mode === "find") {
+          lastFind = "";
+          document.body.classList.add("find");
+          findInput.focus();
+          findInput.select();
+        } else {
+          invoke("focus_page").catch(console.error);
+        }
+      }
+
+      /* ---------------- events ---------------- */
       newtab.addEventListener("click", () => invoke("new_tab", { url: null }).catch(console.error));
 
       listen("tabs", (event) => {
@@ -184,7 +366,57 @@
         render();
       });
 
-      // Seed with the current tab list.
+      listen("load", (event) => {
+        const p = event.payload || {};
+        setProgress(p.id, p.loading, p.progress || 0);
+      });
+
+      listen("ui", (event) => {
+        const mode = (event.payload && event.payload.mode) || "tabs";
+        if (mode === "bookmarked") return showToast("Bookmark added");
+        if (mode === "unbookmarked") return showToast("Bookmark removed");
+        setMode(mode);
+      });
+
+      /* ---------------- omnibox ---------------- */
+      omniInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          const value = omniInput.value;
+          invoke("submit_url", { input: value, newTab: e.metaKey || e.ctrlKey }).catch(console.error);
+          setMode("tabs");
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          setMode("tabs");
+        } else if (e.metaKey && e.key.toLowerCase() === "l") {
+          e.preventDefault();
+          omniInput.select();
+        }
+      });
+
+      /* ---------------- find bar ---------------- */
+      function runFind(forward, reset) {
+        const q = findInput.value;
+        if (!q) return;
+        lastFind = q;
+        invoke("find_query", { query: q, forward, reset }).catch(console.error);
+      }
+
+      findInput.addEventListener("input", () => {
+        if (findInput.value !== lastFind) runFind(true, true);
+      });
+      findInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          if (findInput.value !== lastFind) runFind(true, true);
+          else runFind(!e.shiftKey, false);
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          setMode("tabs");
+        }
+      });
+
+      /* ---------------- seed ---------------- */
       invoke("get_tabs")
         .then((payload) => {
           state = payload || state;
