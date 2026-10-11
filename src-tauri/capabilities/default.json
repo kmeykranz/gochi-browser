@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capabilities granted to the trusted browser chrome webview only. The remote content webview is intentionally left without any capability.",
+  "webviews": ["chrome"],
+  "permissions": ["core:default"]
+}
