@@ -1,15 +1,14 @@
 // Gochi Browser - a lightweight WebKit browser prototype built with Tauri + Rust.
 //
-// UI: there is NO self-drawn chrome at all. The window is frameless-at-the-top
-// (transparent native title bar, macOS traffic lights kept, content full-bleed).
-// Everything is driven by keyboard shortcuts, all customizable in
+// UI: there is NO self-drawn chrome at all. The window keeps the native macOS
+// title bar (traffic lights + drag) but makes it transparent; web pages start
+// BELOW it, so nothing overlaps the page content. Shortcuts are customizable in
 //   ~/.config/gochi-browser/settings.json
 //
 // Webviews per window:
-//   - "tab-N"   : one per browser tab, external web content, fills the window.
-//                 A thin transparent drag strip is injected at the top so the
-//                 window can still be moved (the page otherwise covers the
-//                 native title bar).
+//   - "tab-N"   : one per browser tab, external web content. Sits below the
+//                 native title bar (a Window's child webviews are positioned
+//                 relative to the content view, which is below the title bar).
 //   - "overlay" : an ephemeral centered panel, created on demand. Three modes:
 //                   Cmd+P -> palette.html   (command palette: search + run any action)
 //                   Cmd+O -> switcher.html  (tab switcher)
@@ -29,38 +28,17 @@ use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     webview::WebviewBuilder,
-    AppHandle, LogicalPosition, LogicalSize, Manager, TitleBarStyle, Url, WebviewUrl,
+    AppHandle, LogicalPosition, LogicalSize, Manager, Theme, TitleBarStyle, Url, WebviewUrl,
+    window::Color,
 };
 
-const HOME: &str = "https://duckduckgo.com/";
 const WIN_W: f64 = 1200.0;
 const WIN_H: f64 = 800.0;
 const OVERLAY_LABEL: &str = "overlay";
 
-/// Transparent strip injected into every page so the window stays draggable.
-const DRAG_SCRIPT: &str = r#"
-(function () {
-  try {
-    var ID = "__gochi_drag__";
-    function install() {
-      if (document.getElementById(ID)) return;
-      var root = document.documentElement || document.body;
-      if (!root) return;
-      var d = document.createElement("div");
-      d.id = ID;
-      d.setAttribute("data-tauri-drag-region", "");
-      d.style.cssText =
-        "position:fixed;top:0;left:0;right:0;height:8px;z-index:2147483647;";
-      root.appendChild(d);
-    }
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", install);
-    } else {
-      install();
-    }
-  } catch (e) {}
-})();
-"#;
+/// Colour of the native (transparent) title bar strip that sits above the page.
+const TITLEBAR_LIGHT: (u8, u8, u8) = (236, 236, 238);
+const TITLEBAR_DARK: (u8, u8, u8) = (30, 30, 32);
 
 /* ================================================================== actions */
 
@@ -76,6 +54,8 @@ const ACTIONS: &[ActionDef] = &[
     ActionDef { id: "command_palette", title: "Command Palette", default: Some("CmdOrCtrl+P"), in_menu: true },
     ActionDef { id: "open_address", title: "Open Address…", default: Some("CmdOrCtrl+R"), in_menu: true },
     ActionDef { id: "open_switcher", title: "Go to Tab…", default: Some("CmdOrCtrl+O"), in_menu: true },
+    ActionDef { id: "open_bookmarks", title: "Open Bookmarks…", default: Some("CmdOrCtrl+B"), in_menu: true },
+    ActionDef { id: "open_history", title: "Open History…", default: Some("CmdOrCtrl+Y"), in_menu: true },
     ActionDef { id: "new_tab", title: "New Tab", default: Some("CmdOrCtrl+T"), in_menu: true },
     ActionDef { id: "close_tab", title: "Close Tab", default: Some("CmdOrCtrl+W"), in_menu: true },
     ActionDef { id: "next_tab", title: "Next Tab", default: Some("Ctrl+Tab"), in_menu: true },
@@ -94,13 +74,47 @@ const ACTIONS: &[ActionDef] = &[
     ActionDef { id: "copy", title: "Copy", default: None, in_menu: false },
     ActionDef { id: "paste", title: "Paste", default: None, in_menu: false },
     ActionDef { id: "select_all", title: "Select All", default: None, in_menu: false },
+    ActionDef { id: "open_full_disk_access", title: "Grant Full Disk Access…", default: None, in_menu: false },
 ];
 
-#[derive(Clone, Default, serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 struct Settings {
     /// action id -> accelerator. `null` / "" / "none" disables the shortcut.
     #[serde(default)]
     shortcuts: HashMap<String, Option<String>>,
+    /// Search URL. Either a base results URL (the query is appended as `?q=`) or
+    /// a template containing the `{query}` placeholder.
+    #[serde(default = "default_search")]
+    search: String,
+    /// Page opened on startup and for new tabs.
+    #[serde(default = "default_home")]
+    home: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            shortcuts: HashMap::new(),
+            search: default_search(),
+            home: default_home(),
+        }
+    }
+}
+
+fn default_search() -> String {
+    "https://www.bing.com/search".to_string()
+}
+
+fn default_home() -> String {
+    "https://duckduckgo.com/".to_string()
+}
+
+fn search_template(app: &AppHandle) -> String {
+    app.state::<Settings>().search.clone()
+}
+
+fn home_url(app: &AppHandle) -> String {
+    app.state::<Settings>().home.clone()
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -123,7 +137,11 @@ fn default_settings_json() -> String {
             map.insert(a.id.to_string(), serde_json::Value::String(acc.to_string()));
         }
     }
-    let root = serde_json::json!({ "shortcuts": map });
+    let root = serde_json::json!({
+        "search": default_search(),
+        "home": default_home(),
+        "shortcuts": map,
+    });
     serde_json::to_string_pretty(&root).unwrap_or_else(|_| "{}".to_string())
 }
 
@@ -294,6 +312,29 @@ fn focus_active(app: &AppHandle) {
     }
 }
 
+/// Round the visible corners of a page webview (macOS only).
+#[cfg(target_os = "macos")]
+fn apply_corner_radius(webview: &tauri::Webview, radius: f64) {
+    // Safety: `platform.inner()` is a raw WKWebView pointer; we only touch it
+    // through Objective-C `msg_send!`.
+    let _ = webview.with_webview(move |platform| unsafe {
+        use objc2::msg_send;
+        if platform.inner().is_null() {
+            return;
+        }
+        let view: *mut objc2::runtime::AnyObject = platform.inner().cast();
+        let _: () = msg_send![view, setWantsLayer: true];
+        let layer: *mut objc2::runtime::AnyObject = msg_send![view, layer];
+        if !layer.is_null() {
+            let _: () = msg_send![layer, setCornerRadius: radius];
+            let _: () = msg_send![layer, setMasksToBounds: true];
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apply_corner_radius(_webview: &tauri::Webview, _radius: f64) {}
+
 /* ================================================================== overlay */
 
 fn close_overlay(app: &AppHandle) {
@@ -321,6 +362,7 @@ fn open_overlay(app: &AppHandle, mode: &str) -> Result<(), String> {
     let page = match mode {
         "address" => "address.html",
         "palette" => "palette.html",
+        "bookmarks" | "history" => "picker.html",
         _ => "switcher.html",
     };
     let window = app.get_window("main").ok_or("no main window")?;
@@ -343,10 +385,21 @@ fn open_overlay(app: &AppHandle, mode: &str) -> Result<(), String> {
 
 /* ================================================================== url */
 
-fn normalize(input: &str) -> String {
+/// Percent-encode a search query (application/x-www-form-urlencoded style).
+fn encode_query(s: &str) -> String {
+    let mut u = Url::parse("https://q.invalid/").expect("valid url");
+    u.query_pairs_mut().append_pair("q", s);
+    u.query()
+        .unwrap_or("")
+        .strip_prefix("q=")
+        .unwrap_or("")
+        .to_string()
+}
+
+fn normalize(input: &str, search: &str, home: &str) -> String {
     let s = input.trim();
     if s.is_empty() {
-        return HOME.to_string();
+        return home.to_string();
     }
     if let Ok(u) = Url::parse(s) {
         if matches!(u.scheme(), "http" | "https" | "tauri" | "about" | "file") {
@@ -360,7 +413,11 @@ fn normalize(input: &str) -> String {
             return u.to_string();
         }
     }
-    let mut u = Url::parse("https://duckduckgo.com/").expect("valid search url");
+    // Fall back to a web search using the configured engine.
+    if search.contains("{query}") {
+        return search.replace("{query}", &encode_query(s));
+    }
+    let mut u = Url::parse(search).unwrap_or_else(|_| Url::parse(&default_search()).expect("valid"));
     u.query_pairs_mut().append_pair("q", s);
     u.to_string()
 }
@@ -374,7 +431,6 @@ fn tab_builder(app: &AppHandle, id: String, url: Url) -> WebviewBuilder<tauri::W
     let title_id = id.clone();
 
     WebviewBuilder::new(id, WebviewUrl::External(url))
-        .initialization_script(DRAG_SCRIPT)
         .on_navigation(move |url| {
             let state = nav_app.state::<Shared>();
             let mut st = state.lock().unwrap();
@@ -402,17 +458,21 @@ fn create_tab(app: &AppHandle, url: Option<String>) -> Result<(), String> {
     close_overlay(app);
 
     let id = next_tab_id(app);
-    let target = normalize(url.as_deref().unwrap_or(""));
+    let target = normalize(url.as_deref().unwrap_or(""), &search_template(app), &home_url(app));
     let parsed = Url::parse(&target).map_err(|e| e.to_string())?;
+    let (w, h) = window_logical_size(app);
     let window = app.get_window("main").ok_or("no main window")?;
 
     let webview = window
         .add_child(
             tab_builder(app, id.clone(), parsed),
             LogicalPosition::new(0.0, 0.0),
-            LogicalSize::new(WIN_W, WIN_H),
+            LogicalSize::new(w, h),
         )
         .map_err(|e| e.to_string())?;
+
+    // Round the page corners for the card-like content area look.
+    apply_corner_radius(&webview, 15.0);
 
     {
         let state = app.state::<Shared>();
@@ -528,6 +588,8 @@ fn dispatch_action(app: &AppHandle, id: &str) -> Result<(), String> {
         "open_switcher" => return open_overlay(app, "tabs"),
         "open_address" => return open_overlay(app, "address"),
         "command_palette" => return open_overlay(app, "palette"),
+        "open_bookmarks" => return open_overlay(app, "bookmarks"),
+        "open_history" => return open_overlay(app, "history"),
         _ => {}
     }
 
@@ -577,8 +639,163 @@ fn dispatch_action(app: &AppHandle, id: &str) -> Result<(), String> {
             app.exit(0);
             Ok(())
         }
+        "open_full_disk_access" => open_privacy_settings(),
         other => Err(format!("unknown action: {other}")),
     }
+}
+
+/* ================================================================== safari data */
+
+const FDA_HINT: &str =
+    "Cannot read Safari data. Grant “Full Disk Access” to Gochi Browser in System Settings → Privacy & Security.";
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct PickItem {
+    title: String,
+    url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subtitle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ts: Option<f64>,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct PickerPayload {
+    kind: String,
+    items: Vec<PickItem>,
+}
+
+/// `~/Library/Safari` paths need Full Disk Access; missing permission shows up as
+/// an I/O error, which we translate into a friendly message.
+fn safari_file(name: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    PathBuf::from(home).join("Library/Safari").join(name)
+}
+
+fn read_bookmarks() -> Result<Vec<PickItem>, String> {
+    let path = safari_file("Bookmarks.plist");
+    let value = plist::Value::from_file(&path)
+        .map_err(|e| format!("{FDA_HINT} ({e})"))?;
+    let mut out = Vec::new();
+    collect_bookmarks(&value, "", &mut out);
+    Ok(out)
+}
+
+fn collect_bookmarks(node: &plist::Value, folder: &str, out: &mut Vec<PickItem>) {
+    let Some(dict) = node.as_dictionary() else {
+        return;
+    };
+    let kind = dict
+        .get("WebBookmarkType")
+        .and_then(|v| v.as_string())
+        .unwrap_or("");
+    let title = dict
+        .get("Title")
+        .and_then(|v| v.as_string())
+        .unwrap_or("");
+
+    match kind {
+        "WebBookmarkTypeLeaf" => {
+            let url = dict
+                .get("URLString")
+                .and_then(|v| v.as_string())
+                .unwrap_or("");
+            if url.is_empty() {
+                return;
+            }
+            let leaf_title = dict
+                .get("URIDictionary")
+                .and_then(|v| v.as_dictionary())
+                .and_then(|d| d.get("title"))
+                .and_then(|v| v.as_string())
+                .unwrap_or(title);
+            let folder = if folder.is_empty() { "Bookmarks" } else { folder };
+            out.push(PickItem {
+                title: leaf_title.to_string(),
+                url: url.to_string(),
+                subtitle: Some(folder.to_string()),
+                ts: None,
+            });
+        }
+        _ => {
+            let child_folder = if title.is_empty() {
+                folder.to_string()
+            } else if title == "com.apple.ReadingList" {
+                "Reading List".to_string()
+            } else {
+                title.to_string()
+            };
+            if let Some(children) = dict.get("Children").and_then(|v| v.as_array()) {
+                for child in children {
+                    collect_bookmarks(child, &child_folder, out);
+                }
+            }
+        }
+    }
+}
+
+fn read_history(limit: i64) -> Result<Vec<PickItem>, String> {
+    let src = safari_file("History.db");
+    if !src.exists() {
+        return Err("Safari History.db was not found.".to_string());
+    }
+
+    // Work on a copy so we don't fight Safari's WAL lock.
+    let tmp_dir = std::env::temp_dir().join("gochi-safari");
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+    let tmp = tmp_dir.join("History.db");
+    std::fs::copy(&src, &tmp).map_err(|e| format!("{FDA_HINT} ({e})"))?;
+    for ext in ["-wal", "-shm"] {
+        let from = PathBuf::from(format!("{}{ext}", src.display()));
+        if from.exists() {
+            let _ = std::fs::copy(&from, format!("{}{ext}", tmp.display()));
+        }
+    }
+
+    let conn = rusqlite::Connection::open(&tmp).map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT hi.url, hv.title, hv.visit_time \
+             FROM history_visits hv JOIN history_items hi ON hi.id = hv.history_item \
+             ORDER BY hv.visit_time DESC LIMIT ?1",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map([limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, f64>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut seen = std::collections::HashSet::new();
+    let mut items = Vec::new();
+    for row in rows {
+        let (url, title, visit_time) = row.map_err(|e| e.to_string())?;
+        if url.is_empty() || !seen.insert(url.clone()) {
+            continue;
+        }
+        // Safari stores Core Foundation absolute time (seconds since 2001-01-01).
+        let unix = visit_time + 978_307_200.0;
+        items.push(PickItem {
+            title: title.filter(|t| !t.is_empty()).unwrap_or_else(|| url.clone()),
+            url,
+            subtitle: None,
+            ts: Some(unix),
+        });
+    }
+    Ok(items)
+}
+
+fn open_privacy_settings() -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /* ================================================================== commands */
@@ -588,6 +805,51 @@ fn get_tabs(app: AppHandle) -> TabsPayload {
     let state = app.state::<Shared>();
     let st = state.lock().unwrap();
     payload_of(&st)
+}
+
+/// Which overlay panel is currently open ("bookmarks" / "history" / …).
+#[tauri::command]
+fn overlay_mode(app: AppHandle) -> Option<String> {
+    let state = app.state::<Shared>();
+    let st = state.lock().unwrap();
+    st.overlay.clone()
+}
+
+/// Items for the generic picker overlay (bookmarks or history).
+#[tauri::command]
+async fn picker_items(app: AppHandle) -> Result<PickerPayload, String> {
+    let mode = {
+        let state = app.state::<Shared>();
+        let st = state.lock().unwrap();
+        st.overlay.clone()
+    };
+    match mode.as_deref() {
+        Some("bookmarks") => Ok(PickerPayload { kind: "bookmarks".into(), items: read_bookmarks()? }),
+        Some("history") => Ok(PickerPayload { kind: "history".into(), items: read_history(2000)? }),
+        other => Err(format!("no picker overlay open ({other:?})")),
+    }
+}
+
+/// Open a URL in the current tab (or a new one) and dismiss the overlay.
+#[tauri::command]
+async fn open_url(app: AppHandle, url: String, new_tab: bool) -> Result<(), String> {
+    let parsed = Url::parse(&url).map_err(|e| e.to_string())?;
+    if new_tab {
+        return create_tab(&app, Some(parsed.to_string()));
+    }
+    let id = require_active(&app)?;
+    app.get_webview(&id)
+        .ok_or("tab gone")?
+        .navigate(parsed)
+        .map_err(|e| e.to_string())?;
+    close_overlay(&app);
+    focus_active(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn open_privacy_settings_cmd() -> Result<(), String> {
+    open_privacy_settings()
 }
 
 #[tauri::command]
@@ -652,7 +914,8 @@ async fn run_action(app: AppHandle, id: String) -> Result<(), String> {
 #[tauri::command]
 async fn navigate(app: AppHandle, url: String) -> Result<(), String> {
     let tab = require_active(&app)?;
-    let parsed = Url::parse(&normalize(&url)).map_err(|e| e.to_string())?;
+    let parsed = Url::parse(&normalize(&url, &search_template(&app), &home_url(&app)))
+        .map_err(|e| e.to_string())?;
     app.get_webview(&tab)
         .ok_or("tab gone")?
         .navigate(parsed)
@@ -751,23 +1014,33 @@ fn main() {
             open_palette,
             dismiss_overlay,
             run_action,
-            navigate
+            navigate,
+            overlay_mode,
+            picker_items,
+            open_url,
+            open_privacy_settings_cmd
         ])
         .setup(move |app| {
             app.manage(Mutex::new(BrowserState::default()));
             app.manage(setup_settings);
 
             let window = tauri::window::WindowBuilder::new(app, "main")
-                .title("Gochi Browser")
+                .title("")
                 .inner_size(WIN_W, WIN_H)
                 .min_inner_size(480.0, 360.0)
                 .resizable(true)
                 .visible(false)
                 .build()?;
 
-            // Transparent native title bar: content is full-bleed while macOS
-            // keeps its traffic lights.
-            let _ = window.set_title_bar_style(TitleBarStyle::Overlay);
+            // Transparent native title bar: keeps the macOS traffic lights and the
+            // draggable title bar, but draws no chrome. Pages render below it.
+            let _ = window.set_title_bar_style(TitleBarStyle::Transparent);
+
+            // The transparent title bar shows the window's background colour, so
+            // give it something that matches the current system appearance.
+            let dark = matches!(window.theme(), Ok(Theme::Dark));
+            let (r, g, b) = if dark { TITLEBAR_DARK } else { TITLEBAR_LIGHT };
+            let _ = window.set_background_color(Some(Color(r, g, b, 255)));
 
             let handle = app.handle().clone();
             window.on_window_event(move |event| {
@@ -776,7 +1049,8 @@ fn main() {
                 }
             });
 
-            create_tab(app.handle(), Some(HOME.to_string()))?;
+            // Open the configured home page on startup.
+            create_tab(app.handle(), None)?;
 
             window.show()?;
             Ok(())

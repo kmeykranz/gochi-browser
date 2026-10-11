@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Picker</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --panel: rgba(250, 250, 252, 0.98);
+        --panel-border: rgba(0, 0, 0, 0.12);
+        --text: #1d1d1f;
+        --muted: #86868b;
+        --sel: rgba(74, 144, 217, 0.16);
+        --sel-border: rgba(74, 144, 217, 0.55);
+        --shadow: 0 18px 60px rgba(0, 0, 0, 0.34);
+        --key: rgba(0, 0, 0, 0.06);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --panel: rgba(38, 38, 42, 0.98);
+          --panel-border: rgba(255, 255, 255, 0.12);
+          --text: #f2f2f4;
+          --muted: #9a9aa0;
+          --sel: rgba(74, 144, 217, 0.28);
+          --sel-border: rgba(74, 144, 217, 0.7);
+          --shadow: 0 18px 60px rgba(0, 0, 0, 0.6);
+          --key: rgba(255, 255, 255, 0.1);
+        }
+      }
+
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        font: 14px -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+        color: var(--text);
+        -webkit-user-select: none;
+        user-select: none;
+      }
+
+      #backdrop {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0, 0, 0, 0.34);
+        backdrop-filter: blur(2px);
+      }
+
+      #panel {
+        width: 620px;
+        max-width: calc(100vw - 48px);
+        max-height: 64vh;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        border: 1px solid var(--panel-border);
+        border-radius: 14px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+        transform: translateY(-6vh);
+      }
+
+      #search {
+        flex: none;
+        height: 52px;
+        padding: 0 18px;
+        border: none;
+        border-bottom: 1px solid var(--panel-border);
+        background: transparent;
+        color: var(--text);
+        font-size: 17px;
+        outline: none;
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      #search::placeholder { color: var(--muted); }
+
+      #list {
+        flex: 1 1 auto;
+        overflow-y: auto;
+        padding: 6px;
+      }
+
+      .item {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        padding: 8px 12px;
+        border: 1px solid transparent;
+        border-radius: 9px;
+        cursor: default;
+      }
+      .item .title {
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .item .sub {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        font-size: 12px;
+        color: var(--muted);
+        text-align: right;
+      }
+      .item.selected {
+        background: var(--sel);
+        border-color: var(--sel-border);
+      }
+
+      #footer {
+        flex: none;
+        padding: 8px 16px;
+        border-top: 1px solid var(--panel-border);
+        font-size: 12px;
+        color: var(--muted);
+        display: flex;
+        gap: 16px;
+      }
+      #footer kbd { font: inherit; color: var(--text); }
+
+      #state {
+        padding: 28px 24px;
+        text-align: center;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+      #state button {
+        margin-top: 14px;
+        padding: 8px 14px;
+        border: 1px solid var(--panel-border);
+        border-radius: 8px;
+        background: transparent;
+        color: var(--text);
+        font: inherit;
+        cursor: pointer;
+      }
+      #state button:hover { background: var(--key); }
+    </style>
+  </head>
+  <body>
+    <div id="backdrop">
+      <div id="panel">
+        <input id="search" type="text" placeholder="Search…" spellcheck="false" autocomplete="off" />
+        <div id="list"></div>
+        <div id="footer">
+          <span><kbd>&#8629;</kbd> open</span>
+          <span><kbd>&#8984;&#8629;</kbd> new tab</span>
+          <span><kbd>esc</kbd> close</span>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const { invoke } = window.__TAURI__.core;
+
+      const search = document.getElementById("search");
+      const listEl = document.getElementById("list");
+
+      let all = [];
+      let filtered = [];
+      let selected = 0;
+
+      function subText(item) {
+        if (item.ts != null) {
+          try { return new Date(item.ts * 1000).toLocaleString(); } catch (_) {}
+        }
+        return item.subtitle || "";
+      }
+
+      function render() {
+        listEl.textContent = "";
+        if (filtered.length === 0) {
+          const empty = document.createElement("div");
+          empty.id = "state";
+          empty.textContent = all.length ? "No matches" : "Nothing here yet";
+          listEl.appendChild(empty);
+          return;
+        }
+        filtered.forEach((item, i) => {
+          const el = document.createElement("div");
+          el.className = "item" + (i === selected ? " selected" : "");
+
+          const title = document.createElement("span");
+          title.className = "title";
+          title.textContent = item.title || item.url;
+
+          const sub = document.createElement("span");
+          sub.className = "sub";
+          sub.textContent = subText(item);
+
+          el.appendChild(title);
+          el.appendChild(sub);
+          el.addEventListener("mouseenter", () => { selected = i; render(); });
+          el.addEventListener("click", () => open(item.url, false));
+          listEl.appendChild(el);
+        });
+        const sel = listEl.querySelector(".item.selected");
+        if (sel) sel.scrollIntoView({ block: "nearest" });
+      }
+
+      function applyFilter() {
+        const q = search.value.trim().toLowerCase();
+        filtered = all.filter(
+          (it) =>
+            !q ||
+            (it.title || "").toLowerCase().includes(q) ||
+            it.url.toLowerCase().includes(q) ||
+            (it.subtitle || "").toLowerCase().includes(q),
+        );
+        selected = 0;
+        render();
+      }
+
+      function open(url, newTab) {
+        invoke("open_url", { url, newTab }).catch(console.error);
+      }
+
+      function close() {
+        invoke("dismiss_overlay").catch(console.error);
+      }
+
+      function showError(message) {
+        listEl.textContent = "";
+        const box = document.createElement("div");
+        box.id = "state";
+        box.textContent = message;
+        const btn = document.createElement("button");
+        btn.textContent = "Open Full Disk Access settings";
+        btn.addEventListener("click", () => invoke("open_privacy_settings_cmd").catch(console.error));
+        box.appendChild(document.createElement("br"));
+        box.appendChild(btn);
+        listEl.appendChild(box);
+      }
+
+      search.addEventListener("input", applyFilter);
+
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          close();
+        } else if (e.key === "ArrowDown") {
+          e.preventDefault();
+          if (filtered.length) { selected = (selected + 1) % filtered.length; render(); }
+        } else if (e.key === "ArrowUp") {
+          e.preventDefault();
+          if (filtered.length) { selected = (selected - 1 + filtered.length) % filtered.length; render(); }
+        } else if (e.key === "Enter") {
+          e.preventDefault();
+          if (filtered[selected]) open(filtered[selected].url, e.metaKey || e.ctrlKey);
+        }
+      });
+
+      document.getElementById("backdrop").addEventListener("mousedown", (e) => {
+        if (e.target.id === "backdrop") close();
+      });
+
+      const placeholders = {
+        bookmarks: "Search bookmarks…",
+        history: "Search history…",
+      };
+
+      Promise.all([
+        invoke("overlay_mode").catch(() => null),
+        invoke("picker_items"),
+      ])
+        .then(([mode, payload]) => {
+          if (placeholders[mode]) search.placeholder = placeholders[mode];
+          all = (payload && payload.items) || [];
+          applyFilter();
+          search.focus();
+        })
+        .catch((err) => {
+          search.disabled = true;
+          showError(typeof err === "string" ? err : (err && err.message) || String(err));
+        });
+    </script>
+  </body>
+</html>
