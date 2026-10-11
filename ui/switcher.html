@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Go to Tab</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --panel: rgba(250, 250, 252, 0.98);
+        --panel-border: rgba(0, 0, 0, 0.12);
+        --text: #1d1d1f;
+        --muted: #86868b;
+        --sel: rgba(74, 144, 217, 0.16);
+        --sel-border: rgba(74, 144, 217, 0.55);
+        --input: #ffffff;
+        --shadow: 0 18px 60px rgba(0, 0, 0, 0.34);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --panel: rgba(38, 38, 42, 0.98);
+          --panel-border: rgba(255, 255, 255, 0.12);
+          --text: #f2f2f4;
+          --muted: #9a9aa0;
+          --sel: rgba(74, 144, 217, 0.28);
+          --sel-border: rgba(74, 144, 217, 0.7);
+          --input: #2b2b30;
+          --shadow: 0 18px 60px rgba(0, 0, 0, 0.6);
+        }
+      }
+
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        font: 14px -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+        color: var(--text);
+        -webkit-user-select: none;
+        user-select: none;
+      }
+
+      /* dim + blur the page behind the palette */
+      #backdrop {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0, 0, 0, 0.34);
+        backdrop-filter: blur(2px);
+      }
+
+      #panel {
+        width: 560px;
+        max-width: calc(100vw - 48px);
+        max-height: 62vh;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        border: 1px solid var(--panel-border);
+        border-radius: 14px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+        transform: translateY(-6vh);
+      }
+
+      #search {
+        flex: none;
+        height: 52px;
+        padding: 0 18px;
+        border: none;
+        border-bottom: 1px solid var(--panel-border);
+        background: transparent;
+        color: var(--text);
+        font-size: 17px;
+        outline: none;
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      #search::placeholder { color: var(--muted); }
+
+      #list {
+        flex: 1 1 auto;
+        overflow-y: auto;
+        padding: 6px;
+      }
+
+      .item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        height: 42px;
+        padding: 0 12px;
+        border: 1px solid transparent;
+        border-radius: 9px;
+        cursor: default;
+      }
+      .item .title {
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .item .url {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        font-size: 12px;
+        color: var(--muted);
+        text-align: right;
+      }
+      .item.active .title { font-weight: 600; }
+      .item.active::before {
+        content: "";
+        flex: none;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #28c840;
+      }
+      .item.selected {
+        background: var(--sel);
+        border-color: var(--sel-border);
+      }
+
+      #empty {
+        padding: 24px;
+        text-align: center;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="backdrop">
+      <div id="panel">
+        <input id="search" type="text" placeholder="Search tabs…" spellcheck="false" autocomplete="off" />
+        <div id="list"></div>
+      </div>
+    </div>
+
+    <script>
+      const { invoke } = window.__TAURI__.core;
+
+      const search = document.getElementById("search");
+      const listEl = document.getElementById("list");
+
+      let allTabs = [];
+      let activeId = null;
+      let filtered = [];
+      let selected = 0;
+
+      function render() {
+        listEl.textContent = "";
+        if (filtered.length === 0) {
+          const empty = document.createElement("div");
+          empty.id = "empty";
+          empty.textContent = "No matching tabs";
+          listEl.appendChild(empty);
+          return;
+        }
+        filtered.forEach((tab, i) => {
+          const item = document.createElement("div");
+          item.className =
+            "item" +
+            (tab.id === activeId ? " active" : "") +
+            (i === selected ? " selected" : "");
+
+          const title = document.createElement("span");
+          title.className = "title";
+          title.textContent = tab.title || "Untitled";
+
+          const url = document.createElement("span");
+          url.className = "url";
+          url.textContent = tab.url || "";
+
+          item.appendChild(title);
+          item.appendChild(url);
+          item.addEventListener("mouseenter", () => {
+            selected = i;
+            render();
+          });
+          item.addEventListener("click", () => choose(tab.id));
+
+          listEl.appendChild(item);
+        });
+
+        const sel = listEl.querySelector(".item.selected");
+        if (sel) sel.scrollIntoView({ block: "nearest" });
+      }
+
+      function applyFilter() {
+        const q = search.value.trim().toLowerCase();
+        filtered = allTabs.filter(
+          (t) =>
+            !q ||
+            (t.title || "").toLowerCase().includes(q) ||
+            (t.url || "").toLowerCase().includes(q),
+        );
+        selected = Math.max(0, filtered.findIndex((t) => t.id === activeId));
+        render();
+      }
+
+      function choose(id) {
+        invoke("switch_to", { id }).catch(console.error);
+      }
+
+      function close() {
+        invoke("dismiss_overlay").catch(console.error);
+      }
+
+      search.addEventListener("input", applyFilter);
+
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          close();
+        } else if (e.key === "ArrowDown") {
+          e.preventDefault();
+          if (filtered.length) {
+            selected = (selected + 1) % filtered.length;
+            render();
+          }
+        } else if (e.key === "ArrowUp") {
+          e.preventDefault();
+          if (filtered.length) {
+            selected = (selected - 1 + filtered.length) % filtered.length;
+            render();
+          }
+        } else if (e.key === "Enter") {
+          e.preventDefault();
+          if (filtered[selected]) choose(filtered[selected].id);
+        } else if (e.metaKey && e.key.toLowerCase() === "o") {
+          e.preventDefault();
+          close();
+        }
+      });
+
+      document.getElementById("backdrop").addEventListener("mousedown", (e) => {
+        if (e.target.id === "backdrop") close();
+      });
+
+      invoke("get_tabs")
+        .then((p) => {
+          allTabs = p.tabs || [];
+          activeId = p.active || null;
+          applyFilter();
+          search.focus();
+        })
+        .catch(console.error);
+    </script>
+  </body>
+</html>

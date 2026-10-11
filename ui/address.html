@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Open Address</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --panel: rgba(250, 250, 252, 0.98);
+        --panel-border: rgba(0, 0, 0, 0.12);
+        --text: #1d1d1f;
+        --muted: #86868b;
+        --accent: #4a90d9;
+        --shadow: 0 18px 60px rgba(0, 0, 0, 0.34);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --panel: rgba(38, 38, 42, 0.98);
+          --panel-border: rgba(255, 255, 255, 0.12);
+          --text: #f2f2f4;
+          --muted: #9a9aa0;
+          --shadow: 0 18px 60px rgba(0, 0, 0, 0.6);
+        }
+      }
+
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        font: 14px -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+        color: var(--text);
+        -webkit-user-select: none;
+        user-select: none;
+      }
+
+      #backdrop {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0, 0, 0, 0.34);
+        backdrop-filter: blur(2px);
+      }
+
+      #panel {
+        width: 620px;
+        max-width: calc(100vw - 48px);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        border: 1px solid var(--panel-border);
+        border-radius: 14px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+        transform: translateY(-10vh);
+      }
+
+      #panel .row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 16px;
+      }
+      #panel .row .glyph {
+        flex: none;
+        color: var(--muted);
+        font-size: 16px;
+      }
+
+      #address {
+        flex: 1 1 auto;
+        min-width: 0;
+        height: 56px;
+        border: none;
+        background: transparent;
+        color: var(--text);
+        font-size: 17px;
+        outline: none;
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      #address::placeholder { color: var(--muted); }
+
+      #hint {
+        flex: none;
+        padding: 9px 16px;
+        border-top: 1px solid var(--panel-border);
+        font-size: 12px;
+        color: var(--muted);
+        display: flex;
+        gap: 16px;
+      }
+      #hint kbd {
+        font: inherit;
+        color: var(--text);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="backdrop">
+      <div id="panel">
+        <div class="row">
+          <span class="glyph">&#9906;</span>
+          <input id="address" type="text" placeholder="Search or enter address" spellcheck="false" autocomplete="off" />
+        </div>
+        <div id="hint">
+          <span><kbd>&#8629;</kbd> open</span>
+          <span><kbd>esc</kbd> cancel</span>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const { invoke } = window.__TAURI__.core;
+      const address = document.getElementById("address");
+
+      async function submit() {
+        const url = address.value.trim();
+        if (!url) {
+          invoke("dismiss_overlay").catch(console.error);
+          return;
+        }
+        try {
+          await invoke("navigate", { url });
+        } catch (err) {
+          console.error("navigate failed:", err);
+        }
+        invoke("dismiss_overlay").catch(console.error);
+      }
+
+      address.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          submit();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          invoke("dismiss_overlay").catch(console.error);
+        } else if (e.metaKey && e.key.toLowerCase() === "r") {
+          e.preventDefault();
+          invoke("dismiss_overlay").catch(console.error);
+        }
+      });
+
+      document.getElementById("backdrop").addEventListener("mousedown", (e) => {
+        if (e.target.id === "backdrop") {
+          invoke("dismiss_overlay").catch(console.error);
+        }
+      });
+
+      invoke("get_tabs")
+        .then((p) => {
+          const active = (p.tabs || []).find((t) => t.id === p.active);
+          if (active && active.url) address.value = active.url;
+          address.focus();
+          address.select();
+        })
+        .catch(console.error);
+    </script>
+  </body>
+</html>

@@ -7,45 +7,98 @@
     <style>
       :root {
         color-scheme: light dark;
-        --bg: #f5f5f7;
-        --border: #d3d3d8;
+        --titlebar: #e2e2e7;
+        --toolbar: #f5f5f7;
+        --border: #cfcfd4;
         --text: #1d1d1f;
-        --muted: #8a8a8e;
+        --muted: #86868b;
         --field: #ffffff;
         --hover: rgba(0, 0, 0, 0.07);
         --accent: #4a90d9;
       }
       @media (prefers-color-scheme: dark) {
         :root {
-          --bg: #1f1f22;
+          --titlebar: #232327;
+          --toolbar: #1c1c1f;
           --border: #3a3a3e;
           --text: #f2f2f4;
-          --muted: #98989d;
-          --field: #2c2c30;
+          --muted: #8f8f95;
+          --field: #2b2b30;
           --hover: rgba(255, 255, 255, 0.1);
         }
       }
+
       * { box-sizing: border-box; }
       html, body {
         margin: 0;
-        height: 44px;
+        height: 76px;
         overflow: hidden;
         font: 13px -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
         color: var(--text);
-        background: var(--bg);
+        background: var(--toolbar);
         -webkit-user-select: none;
         user-select: none;
       }
-      #bar {
+
+      /* ---- title bar: window controls + current tab title ---- */
+      #titlebar {
+        display: flex;
+        align-items: center;
+        height: 36px;
+        background: var(--titlebar);
+        padding: 0 12px;
+      }
+
+      .controls {
+        display: flex;
+        gap: 8px;
+        flex: none;
+        padding-right: 14px;
+      }
+      .dot {
+        width: 12px;
+        height: 12px;
+        padding: 0;
+        border: none;
+        border-radius: 50%;
+        display: grid;
+        place-items: center;
+        cursor: pointer;
+        font-size: 8px;
+        font-weight: 700;
+        color: rgba(0, 0, 0, 0);
+        line-height: 1;
+        transition: color 0.12s ease;
+      }
+      .controls:hover .dot { color: rgba(0, 0, 0, 0.55); }
+      .dot.close { background: #ff5f57; }
+      .dot.min { background: #febc2e; }
+      .dot.max { background: #28c840; }
+      .dot:active { filter: brightness(0.85); }
+
+      #win-title {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        text-align: center;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--muted);
+      }
+
+      /* ---- toolbar ---- */
+      #toolbar {
         display: flex;
         align-items: center;
         gap: 6px;
-        height: 44px;
-        padding: 0 10px;
-        background: var(--bg);
+        height: 40px;
+        padding: 0 12px;
+        background: var(--toolbar);
         border-bottom: 1px solid var(--border);
       }
-      button {
+      #toolbar button {
         flex: none;
         width: 30px;
         height: 30px;
@@ -59,82 +112,70 @@
         line-height: 1;
         cursor: pointer;
       }
-      button:hover { background: var(--hover); }
-      button:active { transform: scale(0.94); }
-      #address {
-        flex: 1 1 auto;
-        min-width: 0;
-        height: 30px;
-        padding: 0 14px;
-        border: 1px solid var(--border);
-        border-radius: 15px;
-        background: var(--field);
-        color: var(--text);
-        font-size: 13px;
-        outline: none;
-        -webkit-user-select: text;
-        user-select: text;
-      }
-      #address:focus {
-        border-color: var(--accent);
-        box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
-      }
-      #address::placeholder { color: var(--muted); }
+      #toolbar button:hover { background: var(--hover); }
+      #toolbar button:active { transform: scale(0.94); }
       #reload.busy { color: var(--accent); }
+      #toolbar .spacer { flex: 1 1 auto; }
     </style>
   </head>
   <body>
-    <div id="bar">
+    <div id="titlebar">
+      <div class="controls">
+        <button class="dot close" id="btn-close" title="Close">&#10005;</button>
+        <button class="dot min" id="btn-min" title="Minimize">&#8722;</button>
+        <button class="dot max" id="btn-max" title="Zoom">&#43;</button>
+      </div>
+      <div id="win-title">Gochi Browser</div>
+    </div>
+
+    <div id="toolbar">
       <button id="back" title="Back">&#8249;</button>
       <button id="forward" title="Forward">&#8250;</button>
       <button id="reload" title="Reload / Stop">&#8635;</button>
-      <input id="address" type="text" placeholder="Search or enter address" spellcheck="false" autocomplete="off" />
+      <div class="spacer"></div>
+      <button id="open-address" title="Open Address (&#8984;R)">&#9906;</button>
+      <button id="open-switcher" title="Go to Tab (&#8984;O)">&#9639;</button>
     </div>
 
     <script>
       const { invoke } = window.__TAURI__.core;
       const { listen } = window.__TAURI__.event;
 
-      const address = document.getElementById("address");
+      const titlebar = document.getElementById("titlebar");
+      const winTitle = document.getElementById("win-title");
       const back = document.getElementById("back");
       const forward = document.getElementById("forward");
       const reload = document.getElementById("reload");
 
       let loading = false;
 
-      async function submit() {
-        const url = address.value.trim();
-        if (!url) return;
-        address.blur();
-        try {
-          await invoke("navigate", { url });
-        } catch (err) {
-          console.error("navigate failed:", err);
-        }
-      }
-
-      address.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          submit();
-        } else if (e.key === "Escape") {
-          address.blur();
-        }
-      });
-
       back.addEventListener("click", () => invoke("go_back").catch(console.error));
       forward.addEventListener("click", () => invoke("go_forward").catch(console.error));
       reload.addEventListener("click", () => {
-        if (loading) return;
-        invoke("reload").catch(console.error);
+        if (!loading) invoke("reload").catch(console.error);
       });
 
-      listen("nav", (e) => {
-        address.value = e.payload ?? "";
+      document.getElementById("open-address").addEventListener("click", () => invoke("open_address").catch(console.error));
+      document.getElementById("open-switcher").addEventListener("click", () => invoke("open_switcher").catch(console.error));
+
+      document.getElementById("btn-close").addEventListener("click", () => invoke("window_close"));
+      document.getElementById("btn-min").addEventListener("click", () => invoke("window_minimize"));
+      document.getElementById("btn-max").addEventListener("click", () => invoke("window_toggle_maximize"));
+
+      // Drag the frameless window from any non-interactive part of the title bar.
+      titlebar.addEventListener("mousedown", (e) => {
+        if (e.button !== 0) return;
+        if (e.target.closest("button, input")) return;
+        invoke("window_start_drag");
+      });
+      titlebar.addEventListener("dblclick", (e) => {
+        if (e.target.closest("button, input")) return;
+        invoke("window_toggle_maximize");
       });
 
       listen("title", (e) => {
-        const title = e.payload ? `${e.payload} - Gochi Browser` : "Gochi Browser";
+        const title = e.payload || "Gochi Browser";
+        winTitle.textContent = title;
         document.title = title;
       });
 
@@ -143,6 +184,14 @@
         reload.textContent = loading ? "\u00d7" : "\u21bb";
         reload.classList.toggle("busy", loading);
       });
+
+      // Seed the title with the active tab's title.
+      invoke("get_tabs")
+        .then((p) => {
+          const active = (p.tabs || []).find((t) => t.id === p.active);
+          if (active && active.title) winTitle.textContent = active.title;
+        })
+        .catch(console.error);
     </script>
   </body>
 </html>
