@@ -1,14 +1,16 @@
 // Gochi Browser - a lightweight WebKit browser prototype built with Tauri + Rust.
 //
-// UI: there is NO self-drawn chrome at all. The window keeps the native macOS
-// title bar (traffic lights + drag) but makes it transparent; web pages start
-// BELOW it, so nothing overlaps the page content. Shortcuts are customizable in
+// UI: a single self-drawn tab strip sits in the top row of the window, level
+// with the native macOS traffic lights. The native title bar is used as an
+// overlay (TitleBarStyle::Overlay -> full-size content view), so the traffic
+// lights float above our strip and we leave room for them on the left. Page
+// content starts BELOW the strip. Shortcuts are customizable in
 //   ~/.config/gochi-browser/settings.json
 //
 // Webviews per window:
-//   - "tab-N"   : one per browser tab, external web content. Sits below the
-//                 native title bar (a Window's child webviews are positioned
-//                 relative to the content view, which is below the title bar).
+//   - "chrome"  : the trusted tab strip (local page). Drawn at the very top,
+//                 level with the traffic lights.
+//   - "tab-N"   : one per browser tab, external web content, below the strip.
 //   - "overlay" : an ephemeral centered panel, created on demand. Three modes:
 //                   Cmd+P -> palette.html   (command palette: search + run any action)
 //                   Cmd+O -> switcher.html  (tab switcher)
@@ -28,13 +30,17 @@ use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     webview::WebviewBuilder,
-    AppHandle, LogicalPosition, LogicalSize, Manager, Theme, TitleBarStyle, Url, WebviewUrl,
-    window::Color,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Theme, TitleBarStyle, Url,
+    WebviewUrl, window::Color,
 };
 
 const WIN_W: f64 = 1200.0;
 const WIN_H: f64 = 800.0;
 const OVERLAY_LABEL: &str = "overlay";
+const CHROME_LABEL: &str = "chrome";
+/// Height of the custom tab strip drawn in the top row, in logical pixels.
+/// The native traffic lights are vertically centred within roughly the same row.
+const CHROME_H: f64 = 38.0;
 
 /// Colour of the native (transparent) title bar strip that sits above the page.
 const TITLEBAR_LIGHT: (u8, u8, u8) = (236, 236, 238);
@@ -257,6 +263,16 @@ fn set_window_title(app: &AppHandle, title: &str) {
     }
 }
 
+/// Push the current tab list to the tab-strip webview so it re-renders.
+fn emit_tabs(app: &AppHandle) {
+    let payload = {
+        let state = app.state::<Shared>();
+        let st = state.lock().unwrap();
+        payload_of(&st)
+    };
+    let _ = app.emit_to(CHROME_LABEL, "tabs", payload);
+}
+
 /* ================================================================== geometry */
 
 fn window_logical_size(app: &AppHandle) -> (f64, f64) {
@@ -277,11 +293,18 @@ fn layout(app: &AppHandle) {
         return;
     };
     let logical = size.to_logical::<f64>(scale);
+    let chrome_h = CHROME_H.min(logical.height);
+    let content_h = (logical.height - chrome_h).max(0.0);
+
+    if let Some(chrome) = app.get_webview(CHROME_LABEL) {
+        let _ = chrome.set_position(LogicalPosition::new(0.0, 0.0));
+        let _ = chrome.set_size(LogicalSize::new(logical.width, chrome_h));
+    }
 
     for label in all_labels(app) {
         if let Some(wv) = app.get_webview(&label) {
-            let _ = wv.set_position(LogicalPosition::new(0.0, 0.0));
-            let _ = wv.set_size(LogicalSize::new(logical.width, logical.height));
+            let _ = wv.set_position(LogicalPosition::new(0.0, chrome_h));
+            let _ = wv.set_size(LogicalSize::new(logical.width, content_h));
         }
     }
 
@@ -334,6 +357,44 @@ fn apply_corner_radius(webview: &tauri::Webview, radius: f64) {
 
 #[cfg(not(target_os = "macos"))]
 fn apply_corner_radius(_webview: &tauri::Webview, _radius: f64) {}
+
+/// Hide the native window title text. With `TitleBarStyle::Overlay` the title
+/// bar is drawn on top of our tab strip, so the (centred) title would overlap
+/// the tabs. The traffic lights stay visible.
+#[cfg(target_os = "macos")]
+fn hide_window_title(webview: &tauri::Webview) {
+    let _ = webview.with_webview(move |platform| unsafe {
+        use objc2::msg_send;
+        if platform.inner().is_null() {
+            return;
+        }
+        let view: *mut objc2::runtime::AnyObject = platform.inner().cast();
+        let ns_window: *mut objc2::runtime::AnyObject = msg_send![view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        // NSWindowTitleVisibility: 0 = visible, 1 = hidden.
+        let _: () = msg_send![ns_window, setTitleVisibility: 1isize];
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hide_window_title(_webview: &tauri::Webview) {}
+
+/// Create the trusted tab-strip webview in the top row of the window.
+fn create_chrome(app: &AppHandle) -> Result<(), String> {
+    let (w, h) = window_logical_size(app);
+    let window = app.get_window("main").ok_or("no main window")?;
+    let webview = window
+        .add_child(
+            WebviewBuilder::new(CHROME_LABEL, WebviewUrl::App("chrome.html".into())),
+            LogicalPosition::new(0.0, 0.0),
+            LogicalSize::new(w, CHROME_H.min(h)),
+        )
+        .map_err(|e| e.to_string())?;
+    hide_window_title(&webview);
+    Ok(())
+}
 
 /* ================================================================== overlay */
 
@@ -433,10 +494,13 @@ fn tab_builder(app: &AppHandle, id: String, url: Url) -> WebviewBuilder<tauri::W
     WebviewBuilder::new(id, WebviewUrl::External(url))
         .on_navigation(move |url| {
             let state = nav_app.state::<Shared>();
-            let mut st = state.lock().unwrap();
-            if let Some(tab) = st.tabs.iter_mut().find(|t| t.id == nav_id) {
-                tab.url = url.to_string();
+            {
+                let mut st = state.lock().unwrap();
+                if let Some(tab) = st.tabs.iter_mut().find(|t| t.id == nav_id) {
+                    tab.url = url.to_string();
+                }
             }
+            emit_tabs(&nav_app);
             true
         })
         .on_document_title_changed(move |_webview, title| {
@@ -448,6 +512,7 @@ fn tab_builder(app: &AppHandle, id: String, url: Url) -> WebviewBuilder<tauri::W
                 }
                 st.active.as_deref() == Some(title_id.as_str())
             };
+            emit_tabs(&title_app);
             if is_active {
                 set_window_title(&title_app, &title);
             }
@@ -461,13 +526,14 @@ fn create_tab(app: &AppHandle, url: Option<String>) -> Result<(), String> {
     let target = normalize(url.as_deref().unwrap_or(""), &search_template(app), &home_url(app));
     let parsed = Url::parse(&target).map_err(|e| e.to_string())?;
     let (w, h) = window_logical_size(app);
+    let chrome_h = CHROME_H.min(h);
     let window = app.get_window("main").ok_or("no main window")?;
 
     let webview = window
         .add_child(
             tab_builder(app, id.clone(), parsed),
-            LogicalPosition::new(0.0, 0.0),
-            LogicalSize::new(w, h),
+            LogicalPosition::new(0.0, chrome_h),
+            LogicalSize::new(w, (h - chrome_h).max(0.0)),
         )
         .map_err(|e| e.to_string())?;
 
@@ -491,6 +557,7 @@ fn create_tab(app: &AppHandle, url: Option<String>) -> Result<(), String> {
 
     set_window_title(app, "New Tab");
     let _ = webview.set_focus();
+    emit_tabs(app);
     layout(app);
     Ok(())
 }
@@ -507,6 +574,7 @@ fn switch_to_impl(app: &AppHandle, id: &str) -> Result<(), String> {
     show_only(app, id);
     set_window_title(app, &active_title(app));
     close_overlay(app);
+    emit_tabs(app);
     layout(app);
     Ok(())
 }
@@ -547,6 +615,7 @@ fn close_tab_impl(app: &AppHandle, id: &str) -> Result<(), String> {
         show_only(app, &active);
         set_window_title(app, &active_title(app));
     }
+    emit_tabs(app);
     layout(app);
     Ok(())
 }
@@ -1032,9 +1101,10 @@ fn main() {
                 .visible(false)
                 .build()?;
 
-            // Transparent native title bar: keeps the macOS traffic lights and the
-            // draggable title bar, but draws no chrome. Pages render below it.
-            let _ = window.set_title_bar_style(TitleBarStyle::Transparent);
+            // Overlay title bar: the traffic lights float above our tab strip, and
+            // the content view spans the whole window so the strip can sit in the
+            // top row, level with the lights.
+            let _ = window.set_title_bar_style(TitleBarStyle::Overlay);
 
             // The transparent title bar shows the window's background colour, so
             // give it something that matches the current system appearance.
@@ -1048,6 +1118,9 @@ fn main() {
                     layout(&handle);
                 }
             });
+
+            // Build the tab strip first, then the starting page below it.
+            create_chrome(app.handle())?;
 
             // Open the configured home page on startup.
             create_tab(app.handle(), None)?;

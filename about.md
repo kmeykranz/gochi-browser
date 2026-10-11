@@ -12,6 +12,7 @@
 
 | label | 作用 | 信任级 |
 |---|---|---|
+| `chrome` | 顶部标签栏(自绘 tab strip),与 macOS 红绿灯同行 | 可信(`core:default`) |
 | `tab-N` | 每个标签一个外部网页 webview | 不受信任(无 capability) |
 | `overlay` | 按需创建的居中面板(命令面板/标签切换/地址/书签/历史),创建即置顶、关闭即销毁 | 可信(`core:default`) |
 
@@ -24,21 +25,24 @@
 
 ### capability 划分(`src-tauri/capabilities/`)
 
-- `default.json`:只给 `overlay` → `core:default`。
+- `default.json`:给 `chrome` 和 `overlay` → `core:default` + `core:window:allow-start-dragging`(标签栏空白处拖动窗口用;双击空白处缩放由 `core:default` 里的 `internal_toggle_maximize` 负责)。
 - 标签 webview 不做任何授权(网页理论上能看到 `window.__TAURI__` 全局,这是原型级已知限制)。
 
 ---
 
 ## 2. 窗口与 UI
 
-- **无自绘 UI**:`decorations: true` + `titleBarStyle: Transparent` + 空标题。保留 macOS 原生红黄绿按钮,可拖动/双击缩放。
-- **网页在标题栏下方渲染**(`Window` 的子 webview 相对内容视图定位,而内容视图天然在标题栏之下),不会被顶部盖住。
-- 标题栏是透明的,显示的是窗口背景色 → 按系统深浅色设置(`TITLEBAR_LIGHT` / `TITLEBAR_DARK`)。
-- **网页区域圆角**:新建标签时通过 `with_webview` + objc2 给 WKWebView 的图层设 `cornerRadius=10pt` 且 `masksToBounds`(`apply_corner_radius`),四角被裁成圆角,露出窗口背景色。
-- 窗口 resize 时 `layout()` 把所有标签 webview 和 overlay 重新定位/缩放。
-- 无任何按钮;所有操作靠快捷键 + `⌘P` 命令面板。
+- **自绘标签栏**:`decorations: true` + `titleBarStyle: Overlay`。Overlay 让 content view 铺满整个窗口(fullSizeContentView),于是自绘的标签栏 webview(`chrome`,高 38pt,详见下节)能画在窗口最顶端,与原生红绿灯**同一行并列**。
+- **红绿灯浮在标签栏之上**:红绿灯是原生控件,始终画在 content view 之上;标签栏左侧预留 80pt 让位给它们。
+- **隐藏原生标题文字**:Overlay 下标题栏叠在标签栏之上,标题居中会压住标签,故创建标签栏后用 objc2 对 NSWindow 设 `titleVisibility = hidden`(红绿灯保留);窗口标题仍会同步为当前标签标题(供菜单/调度中心用)。
+- **网页在标签栏下方渲染**:标签 webview 定位在 `y = 38` 起,不会被标签栏盖住。
+- 标签栏空白处可拖动窗口;双击空白处缩放窗口(`data-tauri-drag-region`)。
+- **网页区域圆角**:新建标签时通过 `with_webview` + objc2 给 WKWebView 的图层设 `cornerRadius=15pt` 且 `masksToBounds`(`apply_corner_radius`),四角被裁成圆角,露出窗口背景色。
+- 窗口 resize 时 `layout()` 把标签栏、所有标签 webview 和 overlay 重新定位/缩放。
+- 标签栏右侧有 `+` 新建标签按钮,每个标签可点击切换、点 `×` 关闭。
+- 其余操作靠快捷键 + `⌘P` 命令面板。
 
-启动:读配置 → 建窗口 → 设标题栏 → 开一个标签页(打开配置的首页)。
+启动:读配置 → 建窗口 → 设 Overlay 标题栏 → 建标签栏 webview → 开一个标签页(打开配置的首页)。
 
 ---
 
@@ -92,6 +96,8 @@
 ## 5. 标签管理
 
 - 每个标签一个独立 webview(不是 iframe),label 递增 `tab-N`,能加载任意站点且互不影响。
+- **标签栏(`chrome` webview / `ui/chrome.html`)**:顶部一行,列出所有标签(标题、当前标签高亮、hover 出现 `×`),右侧 `+` 新建;点击标签切到该标签,点 `×` 关闭。它通过 `get_tabs` 拿初始列表,并监听 `tabs` 事件实时刷新。
+- **状态同步**:标签的增删、切换、标题变化、URL 变化都会调用 `emit_tabs()`,把 `TabsPayload` 通过 `tabs` 事件推给标签栏 webview。
 - 切换 = `show()` 当前 / `hide()` 其余,**不销毁** → 保留每个标签的滚动位置、登录态、播放中的视频等。
 - 新建(`⌘T` / 面板):建 webview → 加入状态、设为当前 → 隐藏其它。关闭已有 overlay。
 - 关闭(`⌘W`):移除状态、`close()` 销毁 webview,自动切到相邻标签;关掉**最后一个标签会关掉窗口**。

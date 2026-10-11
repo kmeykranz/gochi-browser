@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gochi Browser — Tabs</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        /* Matches the window background colour set on the Rust side so the strip
+           blends with the rounded page corners below it. */
+        --bar: #ececee;
+        --tab: transparent;
+        --tab-hover: rgba(0, 0, 0, 0.06);
+        --tab-active: #ffffff;
+        --tab-active-border: rgba(0, 0, 0, 0.12);
+        --text: #1d1d1f;
+        --muted: #6e6e73;
+        --close-hover: rgba(0, 0, 0, 0.12);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bar: #1e1e20;
+          --tab-hover: rgba(255, 255, 255, 0.08);
+          --tab-active: #3a3a3f;
+          --tab-active-border: rgba(255, 255, 255, 0.1);
+          --text: #f2f2f4;
+          --muted: #9a9aa0;
+          --close-hover: rgba(255, 255, 255, 0.16);
+        }
+      }
+
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: var(--bar);
+        font: 12px -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+        color: var(--text);
+        -webkit-user-select: none;
+        user-select: none;
+        cursor: default;
+      }
+
+      #bar {
+        display: flex;
+        align-items: center;
+        height: 100%;
+        /* Room for the native macOS traffic lights, which float above this
+           webview in the same top row. */
+        padding: 0 8px 0 80px;
+        gap: 6px;
+      }
+
+      #strip {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+      }
+
+      /* Flexible empty area that stays draggable. */
+      #drag { flex: 1 1 auto; align-self: stretch; }
+
+      .tab {
+        position: relative;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        height: 28px;
+        flex: 0 1 200px;
+        min-width: 56px;
+        padding: 0 8px 0 10px;
+        border: 1px solid transparent;
+        border-radius: 7px;
+        background: var(--tab);
+        color: var(--muted);
+        overflow: hidden;
+      }
+      .tab:hover { background: var(--tab-hover); }
+      .tab.active {
+        background: var(--tab-active);
+        border-color: var(--tab-active-border);
+        color: var(--text);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+      }
+
+      .tab .title {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+
+      .tab .close {
+        flex: none;
+        width: 16px;
+        height: 16px;
+        display: grid;
+        place-items: center;
+        padding: 0;
+        border: none;
+        border-radius: 50%;
+        background: transparent;
+        color: inherit;
+        font-size: 12px;
+        line-height: 1;
+        cursor: pointer;
+        opacity: 0;
+      }
+      .tab:hover .close, .tab.active .close { opacity: 0.6; }
+      .tab .close:hover { opacity: 1; background: var(--close-hover); }
+
+      #newtab {
+        flex: none;
+        width: 26px;
+        height: 26px;
+        display: grid;
+        place-items: center;
+        padding: 0;
+        border: none;
+        border-radius: 7px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 17px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      #newtab:hover { background: var(--tab-hover); color: var(--text); }
+      #newtab:active { transform: scale(0.92); }
+    </style>
+  </head>
+  <body>
+    <div id="bar">
+      <div id="strip" data-tauri-drag-region></div>
+      <button id="newtab" title="New Tab (⌘T)" data-tauri-drag-region="false">+</button>
+      <div id="drag" data-tauri-drag-region></div>
+    </div>
+
+    <script>
+      const { invoke } = window.__TAURI__.core;
+      const { listen } = window.__TAURI__.event;
+
+      const strip = document.getElementById("strip");
+      const newtab = document.getElementById("newtab");
+
+      let state = { tabs: [], active: null };
+
+      function render() {
+        strip.textContent = "";
+        for (const tab of state.tabs) {
+          const el = document.createElement("div");
+          el.className = "tab" + (tab.id === state.active ? " active" : "");
+          el.title = tab.title || tab.url || "";
+          el.addEventListener("click", () => invoke("switch_to", { id: tab.id }).catch(console.error));
+
+          const title = document.createElement("span");
+          title.className = "title";
+          title.textContent = tab.title || "New Tab";
+          el.appendChild(title);
+
+          const close = document.createElement("button");
+          close.className = "close";
+          close.textContent = "\u00d7";
+          close.title = "Close Tab (⌘W)";
+          close.addEventListener("click", (e) => {
+            e.stopPropagation();
+            invoke("close_tab", { id: tab.id }).catch(console.error);
+          });
+          el.appendChild(close);
+
+          strip.appendChild(el);
+        }
+      }
+
+      newtab.addEventListener("click", () => invoke("new_tab", { url: null }).catch(console.error));
+
+      listen("tabs", (event) => {
+        state = event.payload || { tabs: [], active: null };
+        render();
+      });
+
+      // Seed with the current tab list.
+      invoke("get_tabs")
+        .then((payload) => {
+          state = payload || state;
+          render();
+        })
+        .catch(console.error);
+    </script>
+  </body>
+</html>
